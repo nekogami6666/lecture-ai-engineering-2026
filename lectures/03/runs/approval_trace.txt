@@ -1,0 +1,54 @@
+model=FunctionModel (固定応答のテスト用モデル、実LLMではない)
+approval_pending= True
+directory_exists_before_approval= False
+requests_before_approval= 1
+
+=== approve: input='y' ===
+
+[保存確認] learning_log/ に新しい学習記録を保存します。
+{
+  "title": "第3回の確認",
+  "content": "保存前に利用者の承認を求め、拒否された場合は保存しない。"
+}
+[承認] 保存を許可しました。
+
+--- trace ---
+[tool call]   save_learning_log({'title': '第3回の確認', 'content': '保存前に利用者の承認を求め、拒否された場合は保存しない。'})
+[tool return] save_learning_log -> {"saved": true, "path": "learning_log/82a7d1141b414998874737c15e83ffd1.json"}…
+[usage] RunUsage(input_tokens=109, output_tokens=21, requests=2, tool_calls=1)
+saved_files= 1
+saved_title= 第3回の確認
+saved_content= 保存前に利用者の承認を求め、拒否された場合は保存しない。
+requests_total= 2
+
+=== deny: input='n' ===
+
+[保存確認] learning_log/ に新しい学習記録を保存します。
+{
+  "title": "第3回の確認",
+  "content": "保存前に利用者の承認を求め、拒否された場合は保存しない。"
+}
+[拒否] 保存を許可していません。
+
+--- trace ---
+[tool call]   save_learning_log({'title': '第3回の確認', 'content': '保存前に利用者の承認を求め、拒否された場合は保存しない。'})
+[tool return] save_learning_log -> 利用者は保存を承認しませんでした。保存せずに回答してください。…
+[usage] RunUsage(input_tokens=103, output_tokens=15, requests=2)
+saved_files= 0
+requests_total= 2
+
+=== empty: input='' ===
+
+[保存確認] learning_log/ に新しい学習記録を保存します。
+{
+  "title": "第3回の確認",
+  "content": "保存前に利用者の承認を求め、拒否された場合は保存しない。"
+}
+[拒否] 保存を許可していません。
+
+--- trace ---
+[tool call]   save_learning_log({'title': '第3回の確認', 'content': '保存前に利用者の承認を求め、拒否された場合は保存しない。'})
+[tool return] save_learning_log -> 利用者は保存を承認しませんでした。保存せずに回答してください。…
+[usage] RunUsage(input_tokens=103, output_tokens=15, requests=2)
+saved_files= 0
+requests_total= 2

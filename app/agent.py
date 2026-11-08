@@ -16,14 +16,15 @@ import inspect
 import json
 from pathlib import Path
 
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
+from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.google import GoogleProvider
+from pydantic_ai.usage import RunUsage, UsageLimits
 
 from app import tools
 from app.config import MODEL, api_error_message, get_api_key
@@ -35,14 +36,68 @@ INSTRUCTIONS = """\
 - 用語集に見つからないことは、推測で断定せず「用語集にはない」と伝える。
 - 回答の最後に、関係する回（第N回）を示す。
 - 宿題の答えそのものは書かず、考え方のヒントで導く。
+- 確認問題を求められたら make_quiz を使い、正解は利用者の解答後に示す。
+- 学習記録の保存を利用者が希望した場合だけ save_learning_log を使う。
+- 保存前の確認はプログラムが行う。保存結果が saved=true のときだけ保存完了と伝える。
+- 保存を拒否されたら、同じ記録の保存を再度要求せず、保存しなかったと伝える。
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
-agent = Agent(instructions=INSTRUCTIONS)
+agent = Agent(instructions=INSTRUCTIONS, output_type=[str, DeferredToolRequests])
 agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
 
-# TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
+agent.tool_plain(tools.make_quiz)
+agent.tool_plain(tools.save_learning_log, requires_approval=True)
+
+
+class ApprovalLimitExceeded(RuntimeError):
+    """保存の確認が繰り返されすぎたとき、未承認の処理を実行せず停止する。"""
+
+
+def run_with_approval(target: Agent, question: str, model, *, input_fn=None, max_rounds: int = 5):
+    """承認待ちで停止し、各呼び出しの内容を表示してから会話を再開する。
+
+    Enter、曖昧な入力、EOF、Ctrl-C は拒否として扱う。
+    保存の承認は呼び出しID単位であり、次回の保存の許可には引き継がない。
+    """
+    if input_fn is None:
+        input_fn = input
+    usage = RunUsage()
+    limits = UsageLimits(request_limit=12)
+    result = target.run_sync(question, model=model, usage=usage, usage_limits=limits)
+    rounds = 0
+    while isinstance(result.output, DeferredToolRequests):
+        if result.output.calls:
+            raise RuntimeError("外部で実行するツールには対応していません。未実行のまま停止します。")
+        if rounds >= max_rounds:
+            raise ApprovalLimitExceeded("保存確認の上限に達しました。未承認の記録は保存していません。")
+        rounds += 1
+        decisions = DeferredToolResults()
+        interrupted = False
+        for call in result.output.approvals:
+            if call.tool_name != "save_learning_log":
+                decisions.approvals[call.tool_call_id] = ToolDenied("このCLIでは承認できないツールです。")
+                continue
+            print("\n[保存確認] learning_log/ に新しい学習記録を保存します。")
+            # JSON表示で改行・端末制御文字をエスケープし、内容は省略しない。
+            print(json.dumps(call.args_as_dict(), ensure_ascii=False, indent=2))
+            try:
+                choice = "" if interrupted else input_fn("保存しますか？ [y/N]: ")
+            except (EOFError, KeyboardInterrupt):
+                interrupted = True
+                choice = ""
+                print("\n入力が中断されたため、未確認の保存を拒否します。")
+            approved = choice.strip().casefold() in {"y", "yes", "はい"}
+            decisions.approvals[call.tool_call_id] = (
+                True if approved else ToolDenied("利用者は保存を承認しませんでした。保存せずに回答してください。")
+            )
+            print("[承認] 保存を許可しました。" if approved else "[拒否] 保存を許可していません。")
+        result = target.run_sync(
+            model=model, message_history=result.all_messages(),
+            deferred_tool_results=decisions, usage=usage, usage_limits=limits,
+        )
+    return result
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -128,9 +183,12 @@ def main() -> None:
     if args.mcp:
         print("[tools] MCP サーバー（app/mcp_servers.json）")
     try:
-        result = target.run_sync(args.question, model=build_model())
+        result = run_with_approval(target, args.question, build_model())
     except ModelHTTPError as e:
         print(api_error_message(e.status_code, str(e.body)[:200]))
+        raise SystemExit(1)
+    except (ApprovalLimitExceeded, UsageLimitExceeded) as e:
+        print(f"処理を停止しました: {e}")
         raise SystemExit(1)
     print(result.output)
     if args.trace:

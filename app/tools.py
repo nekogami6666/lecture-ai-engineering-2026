@@ -5,11 +5,18 @@
 """
 
 import json
+import os
+import random
+from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
+from uuid import uuid4
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 MAX_RESULTS = 3
+LEARNING_LOG_DIR = Path(__file__).resolve().parent.parent / "learning_log"
+MAX_TITLE_LENGTH = 200
+MAX_CONTENT_LENGTH = 10_000
 
 
 @cache
@@ -77,3 +84,57 @@ def get_lecture_summary(lecture: int) -> str:
         available = sorted(p.stem for p in (DATA_DIR / "lectures").glob("*.md"))
         return f"第{lecture}回の要点はまだありません。用意されている回: {', '.join(available)}"
     return path.read_text(encoding="utf-8")
+
+
+def make_quiz(lecture: int) -> str:
+    """指定した回の用語集から、確認問題を1問とその正解を返す。
+
+    「第2回の確認問題を出して」など、復習の出題を求められたときに使う。
+    lecture は1始まりの講義番号。利用者にはまず問題だけを出し、解答後に正解を示す。
+    """
+    candidates = [entry for entry in load_glossary() if entry["lecture"] == lecture]
+    if not candidates:
+        return json.dumps({"error": f"第{lecture}回の用語はありません。"}, ensure_ascii=False)
+    entry = random.choice(candidates)
+    return json.dumps(
+        {"question": f"「{entry['term']}」の意味は？", "answer": entry["definition"], "lecture": lecture},
+        ensure_ascii=False,
+    )
+
+
+def save_learning_log(title: str, content: str) -> str:
+    """利用者が保存を希望した学習記録を、learning_log/ に新規保存する。
+
+    title は1〜200文字、content は1〜10000文字。タイトルと本文を利用者に
+    確認してもらってから実行する承認必須ツール。パスや秘密情報は渡さない。
+    既存の記録は上書きしない。成功時は saved と相対パス、失敗時は error を返す。
+    """
+    title, content = title.strip(), content.strip()
+    if not (1 <= len(title) <= MAX_TITLE_LENGTH and 1 <= len(content) <= MAX_CONTENT_LENGTH):
+        return json.dumps({"error": "タイトルは1〜200文字、本文は1〜10000文字で指定してください。"}, ensure_ascii=False)
+
+    record = {"title": title, "content": content, "created_at": datetime.now(timezone.utc).isoformat()}
+    # モデルには保存先を決めさせない。固定ディレクトリを開き、その中だけに新規作成する。
+    # dir_fd と O_NOFOLLOW は講座の Linux / Codespaces 環境で利用できる。
+    filename = f"{uuid4().hex}.json"
+    try:
+        LEARNING_LOG_DIR.mkdir(mode=0o700, exist_ok=True)
+        directory_fd = os.open(LEARNING_LOG_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            file_fd = os.open(
+                filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=directory_fd,
+            )
+            try:
+                with os.fdopen(file_fd, "w", encoding="utf-8") as file:
+                    json.dump(record, file, ensure_ascii=False, indent=2)
+                    file.write("\n")
+            except BaseException:
+                # 書き込み失敗時に不完全な記録を残さない。
+                os.unlink(filename, dir_fd=directory_fd)
+                raise
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        return json.dumps({"error": "学習記録を保存できませんでした。保存先と空き容量を確認してください。"}, ensure_ascii=False)
+    return json.dumps({"saved": True, "path": f"learning_log/{filename}"}, ensure_ascii=False)
